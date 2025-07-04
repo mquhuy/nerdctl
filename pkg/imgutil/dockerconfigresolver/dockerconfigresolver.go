@@ -24,6 +24,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -34,6 +35,57 @@ import (
 )
 
 var PushTracker = docker.NewInMemoryTracker()
+
+// Global semaphores per registry host to enforce true concurrency limits
+var (
+	semaphoresMutex sync.RWMutex
+	semaphores      = make(map[string]chan struct{})
+)
+
+// getSemaphore returns or creates a semaphore for a given host with the specified limit
+func getSemaphore(host string, limit int) chan struct{} {
+	semaphoresMutex.Lock()
+	defer semaphoresMutex.Unlock()
+	
+	key := fmt.Sprintf("%s:%d", host, limit)
+	if sem, exists := semaphores[key]; exists {
+		return sem
+	}
+	
+	// Create a new semaphore with the specified limit
+	sem := make(chan struct{}, limit)
+	semaphores[key] = sem
+	log.L.Debugf("Created semaphore for %s with limit %d", host, limit)
+	return sem
+}
+
+// semaphoreTransport wraps an http.RoundTripper to enforce true concurrency limits using semaphores
+type semaphoreTransport struct {
+	transport http.RoundTripper
+	limit     int
+}
+
+// RoundTrip implements http.RoundTripper with semaphore-based concurrency limiting
+func (st *semaphoreTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if st.limit <= 0 {
+		// No limit, use underlying transport directly
+		return st.transport.RoundTrip(req)
+	}
+	
+	host := req.URL.Host
+	sem := getSemaphore(host, st.limit)
+	
+	// Acquire semaphore (blocks if limit reached)
+	log.L.Debugf("Acquiring semaphore for %s (limit %d)", host, st.limit)
+	sem <- struct{}{}
+	defer func() {
+		<-sem // Release semaphore
+		log.L.Debugf("Released semaphore for %s", host)
+	}()
+	
+	log.L.Debugf("Acquired semaphore for %s, making request", host)
+	return st.transport.RoundTrip(req)
+}
 
 // retryTransport wraps an http.RoundTripper to add retry logic for 503 errors
 type retryTransport struct {
@@ -287,15 +339,24 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 			transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
 		}
 
-		// Wrap transport with retry logic if retries are configured
+		// Wrap transport with semaphore-based concurrency limiting
 		var finalTransport http.RoundTripper = transport
+		if o.maxConnsPerHost > 0 {
+			finalTransport = &semaphoreTransport{
+				transport: finalTransport,
+				limit:     o.maxConnsPerHost,
+			}
+			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
+		}
+
+		// Wrap with retry logic if retries are configured
 		if o.maxRetries > 0 {
 			retryDelay := o.retryInitialDelay
 			if retryDelay == 0 {
 				retryDelay = 1000 * time.Millisecond // Default to 1 second
 			}
 			finalTransport = &retryTransport{
-				transport:    transport,
+				transport:    finalTransport,
 				maxRetries:   o.maxRetries,
 				initialDelay: retryDelay,
 			}
