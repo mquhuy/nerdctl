@@ -116,7 +116,12 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		log.L.Infof("retryTransport.RoundTrip: Evaluating retry conditions - resp=%v, statusCode=%d, StatusServiceUnavailable=%d", resp != nil, statusCode, http.StatusServiceUnavailable)
-		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+		
+		// TEMPORARY: Force retry on first attempt to test retry mechanism
+		if attempt == 0 {
+			log.L.Infof("retryTransport.RoundTrip: FORCING RETRY FOR TESTING (attempt %d/%d)", attempt+1, rt.maxRetries)
+			shouldRetry = true
+		} else if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			log.L.Infof("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 			shouldRetry = true
 		} else if err != nil {
