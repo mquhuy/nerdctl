@@ -21,9 +21,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,47 +99,55 @@ type retryTransport struct {
 // RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
 func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	log.L.Debugf("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
-	
+
 	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
 		// Clone the request for potential retries
 		reqClone := req.Clone(req.Context())
-		
+
 		resp, err := rt.transport.RoundTrip(reqClone)
-		
+
 		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, func() int {
-			if resp != nil { return resp.StatusCode }
+			if resp != nil {
+				return resp.StatusCode
+			}
 			return 0
 		}())
-		
-		// If no error or not a 503, return immediately
-		if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
-			log.L.Debugf("retryTransport.RoundTrip: Not retrying - err=%v, status=%d", err, func() int {
-				if resp != nil { return resp.StatusCode }
-				return 0
-			}())
-			return resp, err
+
+		// Retry logic: retry on 503, EOF, or connection reset errors.
+		// These errors are often transient and can be resolved by a retry.
+		shouldRetry := false
+		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+			shouldRetry = true
+		} else if err != nil && (errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection reset by peer")) {
+			shouldRetry = true
 		}
-		
-		// If this is the last attempt, return the 503 response
-		if attempt == rt.maxRetries {
-			log.L.Debugf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
-			return resp, err
+
+		if shouldRetry {
+			// We have a condition that warrants a retry.
+			if attempt == rt.maxRetries {
+				log.L.Debugf("Max retries (%d) exceeded for request to %s", rt.maxRetries, req.URL.Host)
+				return resp, err // Return the last response and error
+			}
+
+			// Close the response body before retrying.
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+
+			// Calculate exponential backoff delay: initialDelay * 2^attempt
+			delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
+			log.L.Debugf("Request to %s failed, retrying in %v (attempt %d/%d)",
+				req.URL.Host, delay, attempt+1, rt.maxRetries)
+
+			// Wait before retrying.
+			time.Sleep(delay)
+			continue // Continue to the next retry attempt
 		}
-		
-		// Close the response body before retrying
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
-		
-		// Calculate exponential backoff delay: initialDelay * 2^attempt
-		delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
-		log.L.Debugf("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)", 
-			req.URL.Host, delay, attempt+1, rt.maxRetries)
-		
-		// Wait before retrying
-		time.Sleep(delay)
+
+		// If we are here, it means we are not retrying.
+		return resp, err
 	}
-	
+
 	// This should never be reached, but return error just in case
 	return nil, fmt.Errorf("unexpected retry logic error")
 }
@@ -364,17 +374,8 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 			transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
 		}
 
-		// Wrap transport with semaphore-based concurrency limiting
-		var finalTransport http.RoundTripper = transport
-		if o.maxConnsPerHost > 0 {
-			finalTransport = &semaphoreTransport{
-				transport: finalTransport,
-				limit:     o.maxConnsPerHost,
-			}
-			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
-		}
-
 		// Wrap with retry logic if retries are configured
+		var finalTransport http.RoundTripper = transport
 		if o.maxRetries > 0 {
 			retryDelay := o.retryInitialDelay
 			if retryDelay == 0 {
@@ -386,6 +387,15 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 				initialDelay: retryDelay,
 			}
 			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+		}
+
+		// Wrap transport with semaphore-based concurrency limiting
+		if o.maxConnsPerHost > 0 {
+			finalTransport = &semaphoreTransport{
+				transport: finalTransport,
+				limit:     o.maxConnsPerHost,
+			}
+			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
 		}
 
 		client := &http.Client{
