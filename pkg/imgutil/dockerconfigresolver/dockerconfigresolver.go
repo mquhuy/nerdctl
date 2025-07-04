@@ -116,12 +116,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		log.L.Infof("retryTransport.RoundTrip: Evaluating retry conditions - resp=%v, statusCode=%d, StatusServiceUnavailable=%d", resp != nil, statusCode, http.StatusServiceUnavailable)
-		
-		// TEMPORARY: Force retry on first attempt to test retry mechanism
-		if attempt == 0 {
-			log.L.Infof("retryTransport.RoundTrip: FORCING RETRY FOR TESTING (attempt %d/%d)", attempt+1, rt.maxRetries)
-			shouldRetry = true
-		} else if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			log.L.Infof("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 			shouldRetry = true
 		} else if err != nil {
@@ -363,11 +358,7 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		tracker = o.tracker
 	}
 
-	resolverOpts := docker.ResolverOptions{
-		Tracker: tracker,
-		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
-	}
-
+	// Build the custom transport chain first
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -379,32 +370,15 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	// Apply connection limits - use exact values when specified, defaults otherwise
-	if o.maxIdleConns > 0 {
-		transport.MaxIdleConns = o.maxIdleConns
-	} else {
-		transport.MaxIdleConns = 100 // Default
-	}
-
+	// Apply connection limits
 	if o.maxConnsPerHost > 0 {
 		transport.MaxConnsPerHost = o.maxConnsPerHost
-		// Also set MaxIdleConnsPerHost to ensure per-host limits are respected
-		transport.MaxIdleConnsPerHost = o.maxConnsPerHost
-		
-		// For very restrictive limits (1-2 connections), disable keep-alives to ensure
-		// strict connection limiting and prevent connection reuse issues
-		if o.maxConnsPerHost <= 2 {
-			transport.DisableKeepAlives = true
-			log.L.Debugf("Disabled keep-alives for strict connection limit of %d", o.maxConnsPerHost)
-		}
-		
-		log.L.Debugf("Set MaxConnsPerHost=%d and MaxIdleConnsPerHost=%d for registry %s", 
-			o.maxConnsPerHost, o.maxConnsPerHost, refHostname)
-	} else {
-		transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
+	}
+	if o.maxIdleConns > 0 {
+		transport.MaxIdleConns = o.maxIdleConns
 	}
 
-	var finalTransport http.RoundTripper = transport
+	finalTransport := http.RoundTripper(transport)
 
 	// Wrap transport with semaphore-based concurrency limiting first
 	if o.maxConnsPerHost > 0 {
@@ -435,6 +409,21 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 
 	if o.requestTimeout > 0 {
 		client.Timeout = o.requestTimeout
+	}
+
+	// Set up the host options with our custom client via UpdateClient
+	ho.UpdateClient = func(defaultClient *http.Client) error {
+		// Replace the default client's transport with our custom retry transport
+		defaultClient.Transport = finalTransport
+		if o.requestTimeout > 0 {
+			defaultClient.Timeout = o.requestTimeout
+		}
+		return nil
+	}
+
+	resolverOpts := docker.ResolverOptions{
+		Tracker: tracker,
+		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
 	}
 
 	resolver := docker.NewResolver(resolverOpts)
