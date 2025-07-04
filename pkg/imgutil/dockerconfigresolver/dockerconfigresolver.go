@@ -97,47 +97,48 @@ type retryTransport struct {
 // RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
 func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	log.L.Debugf("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
-	
+
 	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
 		// Clone the request for potential retries
 		reqClone := req.Clone(req.Context())
-		
+
 		resp, err := rt.transport.RoundTrip(reqClone)
-		
+
 		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, func() int {
-			if resp != nil { return resp.StatusCode }
+			if resp != nil {
+				return resp.StatusCode
+			}
 			return 0
 		}())
-		
-		// If no error or not a 503, return immediately
-		if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
-			log.L.Debugf("retryTransport.RoundTrip: Not retrying - err=%v, status=%d", err, func() int {
-				if resp != nil { return resp.StatusCode }
-				return 0
-			}())
-			return resp, err
+
+		// Retry logic: only retry on 503.
+		// A transport error might accompany a 503 response if the server is overloaded.
+		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+			// We have a 503, so we will retry (unless it's the last attempt).
+			if attempt == rt.maxRetries {
+				log.L.Debugf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
+				return resp, err // Return the last response and error
+			}
+
+			// Close the response body before retrying.
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+
+			// Calculate exponential backoff delay: initialDelay * 2^attempt
+			delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
+			log.L.Debugf("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)",
+				req.URL.Host, delay, attempt+1, rt.maxRetries)
+
+			// Wait before retrying.
+			time.Sleep(delay)
+			continue // Continue to the next retry attempt
 		}
-		
-		// If this is the last attempt, return the 503 response
-		if attempt == rt.maxRetries {
-			log.L.Debugf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
-			return resp, err
-		}
-		
-		// Close the response body before retrying
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
-		
-		// Calculate exponential backoff delay: initialDelay * 2^attempt
-		delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
-		log.L.Debugf("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)", 
-			req.URL.Host, delay, attempt+1, rt.maxRetries)
-		
-		// Wait before retrying
-		time.Sleep(delay)
+
+		// If we are here, it means we are not retrying.
+		return resp, err
 	}
-	
+
 	// This should never be reached, but return error just in case
 	return nil, fmt.Errorf("unexpected retry logic error")
 }
@@ -441,4 +442,3 @@ func NewAuthCreds(refHostname string) (AuthCreds, error) {
 
 	return credFunc, nil
 }
-

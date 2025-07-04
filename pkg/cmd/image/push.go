@@ -35,7 +35,6 @@ import (
 	"github.com/containerd/containerd/v2/core/images/converter"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
-	dockerconfig "github.com/containerd/containerd/v2/core/remotes/docker/config"
 	"github.com/containerd/containerd/v2/pkg/reference"
 	"github.com/containerd/log"
 	"github.com/containerd/stargz-snapshotter/estargz"
