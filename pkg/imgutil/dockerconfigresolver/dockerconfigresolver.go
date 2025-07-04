@@ -106,20 +106,37 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		resp, err := rt.transport.RoundTrip(reqClone)
 
-		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, func() int {
-			if resp != nil {
-				return resp.StatusCode
-			}
-			return 0
-		}())
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
 
-		// Retry logic: retry on 503, EOF, or connection reset errors.
+		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			shouldRetry = true
-		} else if err != nil && (errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection reset by peer")) {
-			shouldRetry = true
+		} else if err != nil {
+			// Check for specific network errors that warrant a retry
+			if errors.Is(err, io.EOF) {
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to io.EOF error")
+				shouldRetry = true
+			} else if strings.Contains(err.Error(), "connection reset by peer") {
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to 'connection reset by peer' error")
+				shouldRetry = true
+			} else if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to temporary network error: %v", netErr)
+				shouldRetry = true
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context deadline exceeded error")
+				shouldRetry = true
+			} else if errors.Is(err, context.Canceled) {
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context canceled error")
+				shouldRetry = true
+			} else {
+				log.L.Debugf("retryTransport.RoundTrip: Not retrying for non-retryable error: %T %v", err, err)
+			}
 		}
 
 		if shouldRetry {
