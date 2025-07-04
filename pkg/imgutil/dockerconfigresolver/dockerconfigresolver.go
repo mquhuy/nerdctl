@@ -116,23 +116,24 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+			log.L.Debugf("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 			shouldRetry = true
 		} else if err != nil {
 			// Check for specific network errors that warrant a retry
 			if errors.Is(err, io.EOF) {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to io.EOF error")
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to io.EOF error (attempt %d/%d)", attempt+1, rt.maxRetries)
 				shouldRetry = true
 			} else if strings.Contains(err.Error(), "connection reset by peer") {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to 'connection reset by peer' error")
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to 'connection reset by peer' error (attempt %d/%d)", attempt+1, rt.maxRetries)
 				shouldRetry = true
 			} else if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to temporary network error: %v", netErr)
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to temporary network error: %v (attempt %d/%d)", netErr, attempt+1, rt.maxRetries)
 				shouldRetry = true
 			} else if errors.Is(err, context.DeadlineExceeded) {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context deadline exceeded error")
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context deadline exceeded error (attempt %d/%d)", attempt+1, rt.maxRetries)
 				shouldRetry = true
 			} else if errors.Is(err, context.Canceled) {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context canceled error")
+				log.L.Debugf("retryTransport.RoundTrip: Retrying due to context canceled error (attempt %d/%d)", attempt+1, rt.maxRetries)
 				shouldRetry = true
 			} else {
 				log.L.Debugf("retryTransport.RoundTrip: Not retrying for non-retryable error: %T %v", err, err)
