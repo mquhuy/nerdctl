@@ -96,20 +96,31 @@ type retryTransport struct {
 
 // RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
 func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	log.L.Debugf("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
+	
 	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
 		// Clone the request for potential retries
 		reqClone := req.Clone(req.Context())
 		
 		resp, err := rt.transport.RoundTrip(reqClone)
 		
+		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, func() int {
+			if resp != nil { return resp.StatusCode }
+			return 0
+		}())
+		
 		// If no error or not a 503, return immediately
 		if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+			log.L.Debugf("retryTransport.RoundTrip: Not retrying - err=%v, status=%d", err, func() int {
+				if resp != nil { return resp.StatusCode }
+				return 0
+			}())
 			return resp, err
 		}
 		
 		// If this is the last attempt, return the 503 response
 		if attempt == rt.maxRetries {
-			log.L.Warnf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
+			log.L.Debugf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
 			return resp, err
 		}
 		
@@ -120,7 +131,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		
 		// Calculate exponential backoff delay: initialDelay * 2^attempt
 		delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
-		log.L.Infof("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)", 
+		log.L.Debugf("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)", 
 			req.URL.Host, delay, attempt+1, rt.maxRetries)
 		
 		// Wait before retrying
@@ -141,6 +152,7 @@ type opts struct {
 	requestTimeout    time.Duration
 	maxRetries        int
 	retryInitialDelay time.Duration
+	tracker           docker.StatusTrackLocker
 }
 
 // Opt for New
@@ -206,6 +218,13 @@ func WithMaxRetries(n int) Opt {
 func WithRetryInitialDelay(d time.Duration) Opt {
 	return func(o *opts) {
 		o.retryInitialDelay = d
+	}
+}
+
+// WithTracker sets a custom status tracker
+func WithTracker(tracker docker.StatusTrackLocker) Opt {
+	return func(o *opts) {
+		o.tracker = tracker
 	}
 }
 
@@ -287,15 +306,21 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		return nil, err
 	}
 
-	resolverOpts := docker.ResolverOptions{
-		Tracker: PushTracker,
-		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
-	}
-
 	// Configure HTTP client with connection limits to prevent registry overload
 	var o opts
 	for _, of := range optFuncs {
 		of(&o)
+	}
+
+	// Use custom tracker if provided, otherwise use global PushTracker
+	tracker := PushTracker
+	if o.tracker != nil {
+		tracker = o.tracker
+	}
+
+	resolverOpts := docker.ResolverOptions{
+		Tracker: tracker,
+		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
 	}
 
 	// Always apply custom HTTP client when any connection limits or retry options are specified
@@ -360,7 +385,7 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 				maxRetries:   o.maxRetries,
 				initialDelay: retryDelay,
 			}
-			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v", o.maxRetries, retryDelay)
+			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
 		}
 
 		client := &http.Client{

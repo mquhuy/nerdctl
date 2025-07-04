@@ -182,18 +182,13 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 	if options.RetryInitialDelay > 0 {
 		dOpts = append(dOpts, dockerconfigresolver.WithRetryInitialDelay(time.Duration(options.RetryInitialDelay)*time.Millisecond))
 	}
+	// Use the local push tracker for this operation
+	dOpts = append(dOpts, dockerconfigresolver.WithTracker(pushTracker))
 
-	ho, err := dockerconfigresolver.NewHostOptions(ctx, refDomain, dOpts...)
+	resolver, err := dockerconfigresolver.New(ctx, refDomain, dOpts...)
 	if err != nil {
 		return err
 	}
-
-	resolverOpts := docker.ResolverOptions{
-		Tracker: pushTracker,
-		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
-	}
-
-	resolver := docker.NewResolver(resolverOpts)
 	if err = pushFunc(resolver); err != nil {
 		// In some circumstance (e.g. people just use 80 port to support pure http), the error will contain message like "dial tcp <port>: connection refused"
 		if !errors.Is(err, http.ErrSchemeMismatch) && !errutil.IsErrConnectionRefused(err) {
