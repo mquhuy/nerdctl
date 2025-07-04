@@ -115,6 +115,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
+		log.L.Infof("retryTransport.RoundTrip: Evaluating retry conditions - resp=%v, statusCode=%d, StatusServiceUnavailable=%d", resp != nil, statusCode, http.StatusServiceUnavailable)
 		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			log.L.Infof("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 			shouldRetry = true
@@ -140,6 +141,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 
+		log.L.Infof("retryTransport.RoundTrip: shouldRetry=%v for attempt %d", shouldRetry, attempt)
 		if shouldRetry {
 			// We have a condition that warrants a retry.
 			if attempt == rt.maxRetries {
