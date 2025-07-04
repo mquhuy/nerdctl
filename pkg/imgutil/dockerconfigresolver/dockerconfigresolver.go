@@ -173,7 +173,7 @@ type opts struct {
 	plainHTTP         bool
 	skipVerifyCerts   bool
 	hostsDirs         []string
-	authCreds         AuthCreds
+	AuthCreds         AuthCreds
 	maxConnsPerHost   int
 	maxIdleConns      int
 	requestTimeout    time.Duration
@@ -209,7 +209,7 @@ func WithHostsDirs(orig []string) Opt {
 
 func WithAuthCreds(ac AuthCreds) Opt {
 	return func(o *opts) {
-		o.authCreds = ac
+		o.AuthCreds = ac
 	}
 }
 
@@ -289,8 +289,8 @@ func NewHostOptions(ctx context.Context, refHostname string, optFuncs ...Opt) (*
 		return dir, nil
 	}
 
-	if o.authCreds != nil {
-		ho.Credentials = o.authCreds
+	if o.AuthCreds != nil {
+		ho.Credentials = o.AuthCreds
 	} else {
 		authCreds, err := NewAuthCreds(refHostname)
 		if err != nil {
@@ -327,6 +327,15 @@ func NewHostOptions(ctx context.Context, refHostname string, optFuncs ...Opt) (*
 // $DOCKER_CONFIG defaults to "~/.docker".
 //
 // refHostname is like "docker.io".
+type customResolver struct {
+	remotes.Resolver
+	client *http.Client
+}
+
+func (r *customResolver) Client(ctx context.Context, host string) (*http.Client, error) {
+	return r.client, nil
+}
+
 func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Resolver, error) {
 	ho, err := NewHostOptions(ctx, refHostname, optFuncs...)
 	if err != nil {
@@ -350,84 +359,80 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
 	}
 
-	// Always apply custom HTTP client when any connection limits or retry options are specified
-	// This ensures user-specified limits take effect, including restrictive values like 1
-	if o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 || o.maxRetries > 0 {
-		log.L.Debugf("Applying custom HTTP client with limits: maxConnsPerHost=%d, maxIdleConns=%d, requestTimeout=%v, maxRetries=%d", 
-			o.maxConnsPerHost, o.maxIdleConns, o.requestTimeout, o.maxRetries)
-		transport := &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 
-		// Apply connection limits - use exact values when specified, defaults otherwise
-		if o.maxIdleConns > 0 {
-			transport.MaxIdleConns = o.maxIdleConns
-		} else {
-			transport.MaxIdleConns = 100 // Default
-		}
+	// Apply connection limits - use exact values when specified, defaults otherwise
+	if o.maxIdleConns > 0 {
+		transport.MaxIdleConns = o.maxIdleConns
+	} else {
+		transport.MaxIdleConns = 100 // Default
+	}
 
-		if o.maxConnsPerHost > 0 {
-			transport.MaxConnsPerHost = o.maxConnsPerHost
-			// Also set MaxIdleConnsPerHost to ensure per-host limits are respected
-			transport.MaxIdleConnsPerHost = o.maxConnsPerHost
-			
-			// For very restrictive limits (1-2 connections), disable keep-alives to ensure
-			// strict connection limiting and prevent connection reuse issues
-			if o.maxConnsPerHost <= 2 {
-				transport.DisableKeepAlives = true
-				log.L.Debugf("Disabled keep-alives for strict connection limit of %d", o.maxConnsPerHost)
-			}
-			
-			log.L.Debugf("Set MaxConnsPerHost=%d and MaxIdleConnsPerHost=%d for registry %s", 
-				o.maxConnsPerHost, o.maxConnsPerHost, refHostname)
-		} else {
-			transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
+	if o.maxConnsPerHost > 0 {
+		transport.MaxConnsPerHost = o.maxConnsPerHost
+		// Also set MaxIdleConnsPerHost to ensure per-host limits are respected
+		transport.MaxIdleConnsPerHost = o.maxConnsPerHost
+		
+		// For very restrictive limits (1-2 connections), disable keep-alives to ensure
+		// strict connection limiting and prevent connection reuse issues
+		if o.maxConnsPerHost <= 2 {
+			transport.DisableKeepAlives = true
+			log.L.Debugf("Disabled keep-alives for strict connection limit of %d", o.maxConnsPerHost)
 		}
+		
+		log.L.Debugf("Set MaxConnsPerHost=%d and MaxIdleConnsPerHost=%d for registry %s", 
+			o.maxConnsPerHost, o.maxConnsPerHost, refHostname)
+	} else {
+		transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
+	}
 
-		// Wrap with retry logic if retries are configured
-		var finalTransport http.RoundTripper = transport
-		if o.maxRetries > 0 {
-			retryDelay := o.retryInitialDelay
-			if retryDelay == 0 {
-				retryDelay = 1000 * time.Millisecond // Default to 1 second
-			}
-			finalTransport = &retryTransport{
-				transport:    finalTransport,
-				maxRetries:   o.maxRetries,
-				initialDelay: retryDelay,
-			}
-			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+	var finalTransport http.RoundTripper = transport
+
+	// Wrap transport with semaphore-based concurrency limiting first
+	if o.maxConnsPerHost > 0 {
+		finalTransport = &semaphoreTransport{
+			transport: finalTransport,
+			limit:     o.maxConnsPerHost,
 		}
+		log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
+	}
 
-		// Wrap transport with semaphore-based concurrency limiting
-		if o.maxConnsPerHost > 0 {
-			finalTransport = &semaphoreTransport{
-				transport: finalTransport,
-				limit:     o.maxConnsPerHost,
-			}
-			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
+	// Then, wrap with retry logic if retries are configured
+	if o.maxRetries > 0 {
+		retryDelay := o.retryInitialDelay
+		if retryDelay == 0 {
+			retryDelay = 1000 * time.Millisecond // Default to 1 second
 		}
-
-		client := &http.Client{
-			Transport: finalTransport,
+		finalTransport = &retryTransport{
+			transport:    finalTransport,
+			maxRetries:   o.maxRetries,
+			initialDelay: retryDelay,
 		}
+		log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+	}
 
-		if o.requestTimeout > 0 {
-			client.Timeout = o.requestTimeout
-		}
+	client := &http.Client{
+		Transport: finalTransport,
+	}
 
-		resolverOpts.Client = client
+	if o.requestTimeout > 0 {
+		client.Timeout = o.requestTimeout
 	}
 
 	resolver := docker.NewResolver(resolverOpts)
-	return resolver, nil
+	return &customResolver{
+		Resolver: resolver,
+		client:   client,
+	}, nil
 }
 
 // AuthCreds is for docker.WithAuthCreds
@@ -468,4 +473,3 @@ func NewAuthCreds(refHostname string) (AuthCreds, error) {
 
 	return credFunc, nil
 }
-
