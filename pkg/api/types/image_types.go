@@ -200,6 +200,8 @@ type ImagePushOptions struct {
 	Quiet bool
 	// AllowNondistributableArtifacts allow pushing non-distributable artifacts
 	AllowNondistributableArtifacts bool
+	// SkipExistingLayers skip checking if layers already exist in registry
+	SkipExistingLayers bool
 }
 
 // RemoteSnapshotterFlags are used for pulling with remote snapshotters

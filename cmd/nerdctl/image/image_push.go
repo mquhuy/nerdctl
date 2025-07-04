@@ -68,6 +68,7 @@ func PushCommand() *cobra.Command {
 	cmd.Flags().BoolP("quiet", "q", false, "Suppress verbose output")
 
 	cmd.Flags().Bool(allowNonDistFlag, false, "Allow pushing images with non-distributable blobs")
+	cmd.Flags().Bool("skip-existing-layers-check", false, "Skip checking if layers already exist in registry (push all layers, avoids HEAD requests)")
 
 	return cmd
 }
@@ -113,6 +114,10 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 	if err != nil {
 		return types.ImagePushOptions{}, err
 	}
+	skipExistingLayers, err := cmd.Flags().GetBool("skip-existing-layers-check")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
 	return types.ImagePushOptions{
 		GOptions:                       globalOptions,
 		SignOptions:                    signOptions,
@@ -124,6 +129,7 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 		IpfsAddress:                    ipfsAddress,
 		Quiet:                          quiet,
 		AllowNondistributableArtifacts: allowNonDist,
+		SkipExistingLayers:             skipExistingLayers,
 		Stdout:                         cmd.OutOrStdout(),
 	}, nil
 }

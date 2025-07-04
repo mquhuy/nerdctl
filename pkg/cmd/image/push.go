@@ -155,7 +155,7 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 	pushTracker := docker.NewInMemoryTracker()
 
 	pushFunc := func(r remotes.Resolver) error {
-		return push.Push(ctx, client, r, pushTracker, options.Stdout, pushRef, ref, platMC, options.AllowNondistributableArtifacts, options.Quiet)
+		return push.Push(ctx, client, r, pushTracker, options.Stdout, pushRef, ref, platMC, options.AllowNondistributableArtifacts, options.Quiet, options.SkipExistingLayers)
 	}
 
 	var dOpts []dockerconfigresolver.Opt
@@ -175,7 +175,12 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
 	}
 
-	resolver := docker.NewResolver(resolverOpts)
+	var resolver remotes.Resolver
+	if options.SkipExistingLayers {
+		resolver = push.NewNoCheckResolver(resolverOpts)
+	} else {
+		resolver = docker.NewResolver(resolverOpts)
+	}
 	if err = pushFunc(resolver); err != nil {
 		// In some circumstance (e.g. people just use 80 port to support pure http), the error will contain message like "dial tcp <port>: connection refused"
 		if !errors.Is(err, http.ErrSchemeMismatch) && !errutil.IsErrConnectionRefused(err) {
@@ -184,9 +189,21 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 		if options.GOptions.InsecureRegistry {
 			log.G(ctx).WithError(err).Warnf("server %q does not seem to support HTTPS, falling back to plain HTTP", refDomain)
 			dOpts = append(dOpts, dockerconfigresolver.WithPlainHTTP(true))
-			resolver, err = dockerconfigresolver.New(ctx, refDomain, dOpts...)
-			if err != nil {
-				return err
+			if options.SkipExistingLayers {
+				ho, err := dockerconfigresolver.NewHostOptions(ctx, refDomain, dOpts...)
+				if err != nil {
+					return err
+				}
+				resolverOpts := docker.ResolverOptions{
+					Tracker: pushTracker,
+					Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
+				}
+				resolver = push.NewNoCheckResolver(resolverOpts)
+			} else {
+				resolver, err = dockerconfigresolver.New(ctx, refDomain, dOpts...)
+				if err != nil {
+					return err
+				}
 			}
 			return pushFunc(resolver)
 		}
