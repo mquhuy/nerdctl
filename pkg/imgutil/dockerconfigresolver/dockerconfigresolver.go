@@ -106,75 +106,20 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		resp, err := rt.transport.RoundTrip(reqClone)
 
-		statusCode := 0
-		if resp != nil {
-			statusCode = resp.StatusCode
-		}
-		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
+		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, func() int {
+			if resp != nil {
+				return resp.StatusCode
+			}
+			return 0
+		}())
 
-		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
+		// Retry logic: retry on 503, EOF, or connection reset errors.
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			shouldRetry = true
-		} else if err != nil {
-			// Check for specific network errors that warrant a retry
-			if errors.Is(err, io.EOF) {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to io.EOF error")
-				shouldRetry = true
-			} else if strings.Contains(err.Error(), "connection reset by peer") {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to 'connection reset by peer' error")
-				shouldRetry = true
-			} else if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				log.L.Debugf("retryTransport.RoundTrip: Retrying due to temporary network error: %v", netErr)
-				shouldRetry = true
-			} else {
-				log.L.Debugf("retryTransport.RoundTrip: Not retrying for non-retryable error: %T %v", err, err)
-			}
-		}
-
-		if shouldRetry {
-			// We have a condition that warrants a retry.
-			if attempt == rt.maxRetries {
-				log.L.Debugf("Max retries (%d) exceeded for request to %s", rt.maxRetries, req.URL.Host)
-				return resp, err // Return the last response and error
-			}
-
-			// Close the response body before retrying.
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-
-			// Calculate exponential backoff delay: initialDelay * 2^attempt
-			delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
-			log.L.Debugf("Request to %s failed, retrying in %v (attempt %d/%d)",
-				req.URL.Host, delay, attempt+1, rt.maxRetries)
-
-			// Wait before retrying.
-			time.Sleep(delay)
-			continue // Continue to the next retry attempt
-		}
-
-		// If we are here, it means we are not retrying.
-		return resp, err
-	}
-
-	// This should never be reached, but return error just in case
-	return nil, fmt.Errorf("unexpected retry logic error")
-}
-
-		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
-		// These errors are often transient and can be resolved by a retry.
-		shouldRetry := false
-		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+		} else if err != nil && (errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection reset by peer")) {
 			shouldRetry = true
-		} else if err != nil {
-			// Check for specific network errors that warrant a retry
-			if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection reset by peer") {
-				shouldRetry = true
-			} else if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				shouldRetry = true
-			}
 		}
 
 		if shouldRetry {
@@ -390,7 +335,7 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 
 	// Always apply custom HTTP client when any connection limits or retry options are specified
 	// This ensures user-specified limits take effect, including restrictive values like 1
-	if o.maxRetries > 0 || o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 {
+	if o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 || o.maxRetries > 0 {
 		log.L.Debugf("Applying custom HTTP client with limits: maxConnsPerHost=%d, maxIdleConns=%d, requestTimeout=%v, maxRetries=%d", 
 			o.maxConnsPerHost, o.maxIdleConns, o.requestTimeout, o.maxRetries)
 		transport := &http.Transport{
@@ -429,18 +374,8 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 			transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
 		}
 
+		// Wrap with retry logic if retries are configured
 		var finalTransport http.RoundTripper = transport
-
-		// Wrap transport with semaphore-based concurrency limiting first
-		if o.maxConnsPerHost > 0 {
-			finalTransport = &semaphoreTransport{
-				transport: finalTransport,
-				limit:     o.maxConnsPerHost,
-			}
-			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
-		}
-
-		// Then, wrap with retry logic if retries are configured
 		if o.maxRetries > 0 {
 			retryDelay := o.retryInitialDelay
 			if retryDelay == 0 {
@@ -452,6 +387,15 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 				initialDelay: retryDelay,
 			}
 			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+		}
+
+		// Wrap transport with semaphore-based concurrency limiting
+		if o.maxConnsPerHost > 0 {
+			finalTransport = &semaphoreTransport{
+				transport: finalTransport,
+				limit:     o.maxConnsPerHost,
+			}
+			log.L.Debugf("Enabled semaphore-based concurrency limiting: limit=%d", o.maxConnsPerHost)
 		}
 
 		client := &http.Client{
