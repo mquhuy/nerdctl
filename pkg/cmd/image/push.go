@@ -167,9 +167,15 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 	dOpts = append(dOpts, dockerconfigresolver.WithHostsDirs(options.GOptions.HostsDir))
 
 	// Configure connection limits to prevent registry overload (503 errors)
-	dOpts = append(dOpts, dockerconfigresolver.WithMaxConnsPerHost(5))
-	dOpts = append(dOpts, dockerconfigresolver.WithMaxIdleConns(50))
-	dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(300*time.Second))
+	if options.MaxConnsPerHost > 0 {
+		dOpts = append(dOpts, dockerconfigresolver.WithMaxConnsPerHost(options.MaxConnsPerHost))
+	}
+	if options.MaxIdleConns > 0 {
+		dOpts = append(dOpts, dockerconfigresolver.WithMaxIdleConns(options.MaxIdleConns))
+	}
+	if options.RequestTimeout > 0 {
+		dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(time.Duration(options.RequestTimeout)*time.Second))
+	}
 
 	ho, err := dockerconfigresolver.NewHostOptions(ctx, refDomain, dOpts...)
 	if err != nil {
@@ -191,9 +197,15 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 			log.G(ctx).WithError(err).Warnf("server %q does not seem to support HTTPS, falling back to plain HTTP", refDomain)
 			dOpts = append(dOpts, dockerconfigresolver.WithPlainHTTP(true))
 			// Apply same connection limits for HTTP fallback
-			dOpts = append(dOpts, dockerconfigresolver.WithMaxConnsPerHost(5))
-			dOpts = append(dOpts, dockerconfigresolver.WithMaxIdleConns(50))
-			dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(300*time.Second))
+			if options.MaxConnsPerHost > 0 {
+				dOpts = append(dOpts, dockerconfigresolver.WithMaxConnsPerHost(options.MaxConnsPerHost))
+			}
+			if options.MaxIdleConns > 0 {
+				dOpts = append(dOpts, dockerconfigresolver.WithMaxIdleConns(options.MaxIdleConns))
+			}
+			if options.RequestTimeout > 0 {
+				dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(time.Duration(options.RequestTimeout)*time.Second))
+			}
 			resolver, err = dockerconfigresolver.New(ctx, refDomain, dOpts...)
 			if err != nil {
 				return err

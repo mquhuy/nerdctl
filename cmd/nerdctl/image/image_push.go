@@ -69,6 +69,12 @@ func PushCommand() *cobra.Command {
 
 	cmd.Flags().Bool(allowNonDistFlag, false, "Allow pushing images with non-distributable blobs")
 
+	// #region connection limit flags
+	cmd.Flags().Int("max-conns-per-host", 5, "Maximum number of connections per registry host")
+	cmd.Flags().Int("max-idle-conns", 50, "Maximum number of idle connections")
+	cmd.Flags().Int("request-timeout", 300, "Request timeout in seconds")
+	// #endregion
+
 	return cmd
 }
 
@@ -113,6 +119,18 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 	if err != nil {
 		return types.ImagePushOptions{}, err
 	}
+	maxConnsPerHost, err := cmd.Flags().GetInt("max-conns-per-host")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
+	maxIdleConns, err := cmd.Flags().GetInt("max-idle-conns")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
+	requestTimeout, err := cmd.Flags().GetInt("request-timeout")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
 	return types.ImagePushOptions{
 		GOptions:                       globalOptions,
 		SignOptions:                    signOptions,
@@ -124,6 +142,9 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 		IpfsAddress:                    ipfsAddress,
 		Quiet:                          quiet,
 		AllowNondistributableArtifacts: allowNonDist,
+		MaxConnsPerHost:                maxConnsPerHost,
+		MaxIdleConns:                   maxIdleConns,
+		RequestTimeout:                 requestTimeout,
 		Stdout:                         cmd.OutOrStdout(),
 	}, nil
 }

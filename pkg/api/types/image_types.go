@@ -200,6 +200,12 @@ type ImagePushOptions struct {
 	Quiet bool
 	// AllowNondistributableArtifacts allow pushing non-distributable artifacts
 	AllowNondistributableArtifacts bool
+	// MaxConnsPerHost maximum number of connections per registry host (default: 5)
+	MaxConnsPerHost int
+	// MaxIdleConns maximum number of idle connections (default: 50)
+	MaxIdleConns int
+	// RequestTimeout timeout for registry requests in seconds (default: 300)
+	RequestTimeout int
 }
 
 // RemoteSnapshotterFlags are used for pulling with remote snapshotters
