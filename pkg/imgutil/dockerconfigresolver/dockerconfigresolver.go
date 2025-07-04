@@ -98,7 +98,7 @@ type retryTransport struct {
 
 // RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
 func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	log.L.Debugf("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
+	log.L.Infof("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
 
 	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
 		// Clone the request for potential retries
@@ -110,13 +110,13 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
+		log.L.Infof("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
 
 		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
 		// These errors are often transient and can be resolved by a retry.
 		shouldRetry := false
 		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
-			log.L.Debugf("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
+			log.L.Infof("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 			shouldRetry = true
 		} else if err != nil {
 			// Check for specific network errors that warrant a retry
@@ -163,6 +163,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		// If we are here, it means we are not retrying.
+		log.L.Infof("retryTransport.RoundTrip: Not retrying, returning response (status=%d, err=%v)", statusCode, err)
 		return resp, err
 	}
 
@@ -418,7 +419,7 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 			maxRetries:   o.maxRetries,
 			initialDelay: retryDelay,
 		}
-		log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+		log.L.Infof("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
 	}
 
 	client := &http.Client{
