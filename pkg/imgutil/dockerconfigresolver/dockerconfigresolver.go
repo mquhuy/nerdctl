@@ -20,6 +20,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
+	"net/http"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
@@ -35,6 +38,9 @@ type opts struct {
 	skipVerifyCerts bool
 	hostsDirs       []string
 	authCreds       AuthCreds
+	maxConnsPerHost int
+	maxIdleConns    int
+	requestTimeout  time.Duration
 }
 
 // Opt for New
@@ -65,6 +71,27 @@ func WithHostsDirs(orig []string) Opt {
 func WithAuthCreds(ac AuthCreds) Opt {
 	return func(o *opts) {
 		o.authCreds = ac
+	}
+}
+
+// WithMaxConnsPerHost sets the maximum number of connections per host
+func WithMaxConnsPerHost(n int) Opt {
+	return func(o *opts) {
+		o.maxConnsPerHost = n
+	}
+}
+
+// WithMaxIdleConns sets the maximum number of idle connections
+func WithMaxIdleConns(n int) Opt {
+	return func(o *opts) {
+		o.maxIdleConns = n
+	}
+}
+
+// WithRequestTimeout sets the request timeout
+func WithRequestTimeout(d time.Duration) Opt {
+	return func(o *opts) {
+		o.requestTimeout = d
 	}
 }
 
@@ -151,6 +178,35 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		Hosts:   dockerconfig.ConfigureHosts(ctx, *ho),
 	}
 
+	// Configure HTTP client with connection limits to prevent registry overload
+	var o opts
+	for _, of := range optFuncs {
+		of(&o)
+	}
+
+	if o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 {
+		client := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				MaxIdleConns:          getOrDefault(o.maxIdleConns, 100),
+				MaxConnsPerHost:       getOrDefault(o.maxConnsPerHost, 10),
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+		}
+
+		if o.requestTimeout > 0 {
+			client.Timeout = o.requestTimeout
+		}
+
+		resolverOpts.Client = client
+	}
+
 	resolver := docker.NewResolver(resolverOpts)
 	return resolver, nil
 }
@@ -192,4 +248,12 @@ func NewAuthCreds(refHostname string) (AuthCreds, error) {
 	}
 
 	return credFunc, nil
+}
+
+// getOrDefault returns the value if it's greater than 0, otherwise returns the default
+func getOrDefault(value, defaultValue int) int {
+	if value > 0 {
+		return value
+	}
+	return defaultValue
 }
