@@ -75,6 +75,11 @@ func PushCommand() *cobra.Command {
 	cmd.Flags().Int("request-timeout", 300, "Request timeout in seconds")
 	// #endregion
 
+	// #region retry flags
+	cmd.Flags().Int("max-retries", 3, "Maximum number of retry attempts for 503 errors")
+	cmd.Flags().Int("retry-initial-delay", 1000, "Initial delay before first retry in milliseconds")
+	// #endregion
+
 	return cmd
 }
 
@@ -131,6 +136,14 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 	if err != nil {
 		return types.ImagePushOptions{}, err
 	}
+	maxRetries, err := cmd.Flags().GetInt("max-retries")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
+	retryInitialDelay, err := cmd.Flags().GetInt("retry-initial-delay")
+	if err != nil {
+		return types.ImagePushOptions{}, err
+	}
 	return types.ImagePushOptions{
 		GOptions:                       globalOptions,
 		SignOptions:                    signOptions,
@@ -145,6 +158,8 @@ func pushOptions(cmd *cobra.Command) (types.ImagePushOptions, error) {
 		MaxConnsPerHost:                maxConnsPerHost,
 		MaxIdleConns:                   maxIdleConns,
 		RequestTimeout:                 requestTimeout,
+		MaxRetries:                     maxRetries,
+		RetryInitialDelay:              retryInitialDelay,
 		Stdout:                         cmd.OutOrStdout(),
 	}, nil
 }

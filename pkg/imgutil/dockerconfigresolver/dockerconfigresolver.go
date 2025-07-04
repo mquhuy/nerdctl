@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"time"
@@ -33,14 +35,60 @@ import (
 
 var PushTracker = docker.NewInMemoryTracker()
 
+// retryTransport wraps an http.RoundTripper to add retry logic for 503 errors
+type retryTransport struct {
+	transport    http.RoundTripper
+	maxRetries   int
+	initialDelay time.Duration
+}
+
+// RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
+func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
+		// Clone the request for potential retries
+		reqClone := req.Clone(req.Context())
+		
+		resp, err := rt.transport.RoundTrip(reqClone)
+		
+		// If no error or not a 503, return immediately
+		if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+			return resp, err
+		}
+		
+		// If this is the last attempt, return the 503 response
+		if attempt == rt.maxRetries {
+			log.L.Warnf("Max retries (%d) exceeded for 503 Service Unavailable from %s", rt.maxRetries, req.URL.Host)
+			return resp, err
+		}
+		
+		// Close the response body before retrying
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		
+		// Calculate exponential backoff delay: initialDelay * 2^attempt
+		delay := time.Duration(float64(rt.initialDelay) * math.Pow(2, float64(attempt)))
+		log.L.Infof("503 Service Unavailable from %s, retrying in %v (attempt %d/%d)", 
+			req.URL.Host, delay, attempt+1, rt.maxRetries)
+		
+		// Wait before retrying
+		time.Sleep(delay)
+	}
+	
+	// This should never be reached, but return error just in case
+	return nil, fmt.Errorf("unexpected retry logic error")
+}
+
 type opts struct {
-	plainHTTP       bool
-	skipVerifyCerts bool
-	hostsDirs       []string
-	authCreds       AuthCreds
-	maxConnsPerHost int
-	maxIdleConns    int
-	requestTimeout  time.Duration
+	plainHTTP         bool
+	skipVerifyCerts   bool
+	hostsDirs         []string
+	authCreds         AuthCreds
+	maxConnsPerHost   int
+	maxIdleConns      int
+	requestTimeout    time.Duration
+	maxRetries        int
+	retryInitialDelay time.Duration
 }
 
 // Opt for New
@@ -92,6 +140,20 @@ func WithMaxIdleConns(n int) Opt {
 func WithRequestTimeout(d time.Duration) Opt {
 	return func(o *opts) {
 		o.requestTimeout = d
+	}
+}
+
+// WithMaxRetries sets the maximum number of retry attempts for 503 errors
+func WithMaxRetries(n int) Opt {
+	return func(o *opts) {
+		o.maxRetries = n
+	}
+}
+
+// WithRetryInitialDelay sets the initial delay before first retry
+func WithRetryInitialDelay(d time.Duration) Opt {
+	return func(o *opts) {
+		o.retryInitialDelay = d
 	}
 }
 
@@ -184,20 +246,64 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 		of(&o)
 	}
 
-	if o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 {
+	// Always apply custom HTTP client when any connection limits or retry options are specified
+	// This ensures user-specified limits take effect, including restrictive values like 1
+	if o.maxConnsPerHost > 0 || o.maxIdleConns > 0 || o.requestTimeout > 0 || o.maxRetries > 0 {
+		log.L.Debugf("Applying custom HTTP client with limits: maxConnsPerHost=%d, maxIdleConns=%d, requestTimeout=%v, maxRetries=%d", 
+			o.maxConnsPerHost, o.maxIdleConns, o.requestTimeout, o.maxRetries)
+		transport := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+
+		// Apply connection limits - use exact values when specified, defaults otherwise
+		if o.maxIdleConns > 0 {
+			transport.MaxIdleConns = o.maxIdleConns
+		} else {
+			transport.MaxIdleConns = 100 // Default
+		}
+
+		if o.maxConnsPerHost > 0 {
+			transport.MaxConnsPerHost = o.maxConnsPerHost
+			// Also set MaxIdleConnsPerHost to ensure per-host limits are respected
+			transport.MaxIdleConnsPerHost = o.maxConnsPerHost
+			
+			// For very restrictive limits (1-2 connections), disable keep-alives to ensure
+			// strict connection limiting and prevent connection reuse issues
+			if o.maxConnsPerHost <= 2 {
+				transport.DisableKeepAlives = true
+				log.L.Debugf("Disabled keep-alives for strict connection limit of %d", o.maxConnsPerHost)
+			}
+			
+			log.L.Debugf("Set MaxConnsPerHost=%d and MaxIdleConnsPerHost=%d for registry %s", 
+				o.maxConnsPerHost, o.maxConnsPerHost, refHostname)
+		} else {
+			transport.MaxConnsPerHost = 0 // Use Go's default (no limit)
+		}
+
+		// Wrap transport with retry logic if retries are configured
+		var finalTransport http.RoundTripper = transport
+		if o.maxRetries > 0 {
+			retryDelay := o.retryInitialDelay
+			if retryDelay == 0 {
+				retryDelay = 1000 * time.Millisecond // Default to 1 second
+			}
+			finalTransport = &retryTransport{
+				transport:    transport,
+				maxRetries:   o.maxRetries,
+				initialDelay: retryDelay,
+			}
+			log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v", o.maxRetries, retryDelay)
+		}
+
 		client := &http.Client{
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				MaxIdleConns:          getOrDefault(o.maxIdleConns, 100),
-				MaxConnsPerHost:       getOrDefault(o.maxConnsPerHost, 10),
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
+			Transport: finalTransport,
 		}
 
 		if o.requestTimeout > 0 {
@@ -250,10 +356,3 @@ func NewAuthCreds(refHostname string) (AuthCreds, error) {
 	return credFunc, nil
 }
 
-// getOrDefault returns the value if it's greater than 0, otherwise returns the default
-func getOrDefault(value, defaultValue int) int {
-	if value > 0 {
-		return value
-	}
-	return defaultValue
-}

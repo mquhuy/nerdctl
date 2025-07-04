@@ -176,6 +176,12 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 	if options.RequestTimeout > 0 {
 		dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(time.Duration(options.RequestTimeout)*time.Second))
 	}
+	if options.MaxRetries > 0 {
+		dOpts = append(dOpts, dockerconfigresolver.WithMaxRetries(options.MaxRetries))
+	}
+	if options.RetryInitialDelay > 0 {
+		dOpts = append(dOpts, dockerconfigresolver.WithRetryInitialDelay(time.Duration(options.RetryInitialDelay)*time.Millisecond))
+	}
 
 	ho, err := dockerconfigresolver.NewHostOptions(ctx, refDomain, dOpts...)
 	if err != nil {
@@ -205,6 +211,12 @@ func Push(ctx context.Context, client *containerd.Client, rawRef string, options
 			}
 			if options.RequestTimeout > 0 {
 				dOpts = append(dOpts, dockerconfigresolver.WithRequestTimeout(time.Duration(options.RequestTimeout)*time.Second))
+			}
+			if options.MaxRetries > 0 {
+				dOpts = append(dOpts, dockerconfigresolver.WithMaxRetries(options.MaxRetries))
+			}
+			if options.RetryInitialDelay > 0 {
+				dOpts = append(dOpts, dockerconfigresolver.WithRetryInitialDelay(time.Duration(options.RetryInitialDelay)*time.Millisecond))
 			}
 			resolver, err = dockerconfigresolver.New(ctx, refDomain, dOpts...)
 			if err != nil {

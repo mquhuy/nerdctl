@@ -206,6 +206,10 @@ type ImagePushOptions struct {
 	MaxIdleConns int
 	// RequestTimeout timeout for registry requests in seconds (default: 300)
 	RequestTimeout int
+	// MaxRetries maximum number of retry attempts for 503 errors (default: 3)
+	MaxRetries int
+	// RetryInitialDelay initial delay before first retry in milliseconds (default: 1000)
+	RetryInitialDelay int
 }
 
 // RemoteSnapshotterFlags are used for pulling with remote snapshotters
