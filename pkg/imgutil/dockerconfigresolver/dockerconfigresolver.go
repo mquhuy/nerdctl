@@ -100,7 +100,7 @@ type retryTransport struct {
 // depending on the result
 func RoundTripErrorClassifier(resp *http.Response, err error, rt *retryTransport, attempt int) bool {
 	if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
-		log.L.Infof("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
+		log.L.Debugf("retryTransport.RoundTrip: Retrying due to 503 Service Unavailable error (attempt %d/%d)", attempt+1, rt.maxRetries)
 		return true
 	} else if err != nil {
 		// Check for specific network errors that warrant a retry
@@ -127,7 +127,7 @@ func RoundTripErrorClassifier(resp *http.Response, err error, rt *retryTransport
 
 // RoundTrip implements http.RoundTripper with retry logic for 503 Service Unavailable errors
 func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	log.L.Infof("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
+	log.L.Debugf("retryTransport.RoundTrip: Starting request to %s (maxRetries=%d)", req.URL.Host, rt.maxRetries)
 
 	for attempt := 0; attempt <= rt.maxRetries; attempt++ {
 		// Clone the request for potential retries
@@ -139,13 +139,13 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		log.L.Infof("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
+		log.L.Debugf("retryTransport.RoundTrip: attempt %d, err=%v, status=%d", attempt, err, statusCode)
 
 		// Retry logic: retry on 503, EOF, connection reset, or temporary network errors.
 		// These errors are often transient and can be resolved by a retry.
-		log.L.Infof("retryTransport.RoundTrip: Evaluating retry conditions - resp=%v, statusCode=%d, StatusServiceUnavailable=%d", resp != nil, statusCode, http.StatusServiceUnavailable)
+		log.L.Debugf("retryTransport.RoundTrip: Evaluating retry conditions - resp=%v, statusCode=%d, StatusServiceUnavailable=%d", resp != nil, statusCode, http.StatusServiceUnavailable)
 		shouldRetry := RoundTripErrorClassifier(resp, err, rt, attempt)
-		log.L.Infof("retryTransport.RoundTrip: shouldRetry=%v for attempt %d", shouldRetry, attempt)
+		log.L.Debugf("retryTransport.RoundTrip: shouldRetry=%v for attempt %d", shouldRetry, attempt)
 		if shouldRetry {
 			// We have a condition that warrants a retry.
 			if attempt == rt.maxRetries {
@@ -169,7 +169,7 @@ func (rt *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		// If we are here, it means we are not retrying.
-		log.L.Infof("retryTransport.RoundTrip: Not retrying, returning response (status=%d, err=%v)", statusCode, err)
+		log.L.Debugf("retryTransport.RoundTrip: Not retrying, returning response (status=%d, err=%v)", statusCode, err)
 		return resp, err
 	}
 
@@ -404,7 +404,7 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 			maxRetries:   o.maxRetries,
 			initialDelay: retryDelay,
 		}
-		log.L.Infof("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
+		log.L.Debugf("Enabled retry logic: maxRetries=%d, initialDelay=%v for %s", o.maxRetries, retryDelay, refHostname)
 	}
 
 	client := &http.Client{
